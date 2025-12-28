@@ -52,10 +52,10 @@
 #define ATK_MS901M_UART_PORT_NUM 1  // UART port for module
 #endif
 #ifndef ATK_MS901M_UART_TX_PIN
-#define ATK_MS901M_UART_TX_PIN 17  // 默认占位，后面按板型覆盖
+#define ATK_MS901M_UART_TX_PIN 17  // 榛樿鍗犱綅锛屽悗闈㈡寜鏉垮瀷瑕嗙洊
 #endif
 #ifndef ATK_MS901M_UART_RX_PIN
-#define ATK_MS901M_UART_RX_PIN 18  // 默认占位，后面按板型覆盖
+#define ATK_MS901M_UART_RX_PIN 18  // 榛樿鍗犱綅锛屽悗闈㈡寜鏉垮瀷瑕嗙洊
 #endif
 #ifndef ATK_MS901M_UART_BAUDRATE
 #define ATK_MS901M_UART_BAUDRATE 115200
@@ -119,7 +119,10 @@
 #define ENABLE_BUZZER 1
 #endif
 
-#ifdef CONFIG_TARGET_ESP32_S2_DRONE_V1_2
+#if defined(CONFIG_TARGET_ESP32_S2_DRONE_V1_2) || defined(CONFIG_TARGET_ESP32_S3_DRONE_WROOM_1)
+#undef ATK_MS901M_UART_PORT_NUM
+#define ATK_MS901M_UART_PORT_NUM 0
+
 #undef USE_DECK_I2C
 #define USE_DECK_I2C 0
 #undef ATK_MS901M_UART_TX_PIN
@@ -216,9 +219,9 @@
 #ifndef CONFIG_IDF_TARGET_ESP32
 #error "ESPLANE_V1 hardware with ESP32 onboard"
 #endif
-#elif defined(CONFIG_TARGET_ESP32_S2_DRONE_V1_2)
+#elif defined(CONFIG_TARGET_ESP32_S2_DRONE_V1_2) || defined(CONFIG_TARGET_ESP32_S3_DRONE_WROOM_1)
 #ifdef CONFIG_IDF_TARGET_ESP32
-#error "ESP32_S2_DRONE_V1_2 hardware with ESP32S2/S3 onboard"
+#error "ESP32-S2/S3 drone hardware with ESP32S2/S3 onboard"
 #endif
 #endif
 

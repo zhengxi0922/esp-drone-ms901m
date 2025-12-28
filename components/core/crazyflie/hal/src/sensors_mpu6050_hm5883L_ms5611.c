@@ -444,14 +444,14 @@ static void sensorsDeviceInit(void)
     mpu6050SetFullScaleAccelRange(SENSORS_ACCEL_FS_CFG);
 
     // 设置陀螺和加速度计的数字低通带宽
-    // ESP32_S2_DRONE_V1_2 板振动更大，带宽应更低
+    // ESP-Drone v1.2 板振动更大，带宽应更低
 #ifdef SENSORS_MPU6050_DLPF_256HZ
     // 256Hz 数字低通仅适用于振动较小的情况
     // 设置输出率 (15)：8000 / (1 + 7) = 1000Hz
     mpu6050SetRate(7);
     // 设置数字低通带宽
     mpu6050SetDLPFMode(MPU6050_DLPF_BW_256);
-#elif defined(CONFIG_TARGET_ESP32_S2_DRONE_V1_2)
+#elif defined(CONFIG_TARGET_ESP32_S2_DRONE_V1_2) || defined(CONFIG_TARGET_ESP32_S3_DRONE_WROOM_1)
     // DLPF 带宽过低可能导致不稳定并降低敏捷性，
     // 但有利于处理振动和螺旋桨不平衡
     // 设置输出率 (1)：1000 / (1 + 0) = 1000Hz
@@ -1015,7 +1015,7 @@ void sensorsMpu6050Hmc5883lMs5611SetAccMode(accModes accMode)
     case ACC_MODE_FLIGHT:
     default:
         mpu6050SetRate(0);
-#ifdef CONFIG_TARGET_ESP32_S2_DRONE_V1_2
+#if defined(CONFIG_TARGET_ESP32_S2_DRONE_V1_2) || defined(CONFIG_TARGET_ESP32_S3_DRONE_WROOM_1)
         mpu6050SetDLPFMode(MPU6050_DLPF_BW_42);
         for (uint8_t i = 0; i < 3; i++) {
         lpf2pInit(&accLpf[i], 1000, ACCEL_LPF_CUTOFF_FREQ);

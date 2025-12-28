@@ -45,7 +45,7 @@ ATK_MS901M_AXIS_INVERT_X
 ```
 
 Notes:
-- For `CONFIG_TARGET_ESP32_S2_DRONE_V1_2`, the default UART pins are TX=IO36 and RX=IO37.
+- For `CONFIG_TARGET_ESP32_S3_DRONE_WROOM_1` (and legacy `CONFIG_TARGET_ESP32_S2_DRONE_V1_2`), the default UART pins are TX=IO36 and RX=IO37.
 - When `USE_ATK_MS901M=1`, deck SPI is disabled to avoid pin conflicts.
 
 ## Docs and Hardware
