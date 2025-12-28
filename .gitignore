@@ -1,0 +1,15 @@
+# ESP-IDF 忽略规则
+build/
+sdkconfig
+sdkconfig.old
+*.elf
+*.bin
+*.map
+*.log
+.DS_Store
+.vscode/
+.idea/
+cmake-build-*/
+.pytest_cache/
+__pycache__/
+# 如果你有其他要忽略的文件，比如本地配置，也可以加在这里
