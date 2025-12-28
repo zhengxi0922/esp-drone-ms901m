@@ -55,6 +55,7 @@
 #include "stabilizer.h"
 #include "commander.h"
 #include "console.h"
+#include "atk_console.h"
 #include "wifilink.h"
 #include "mem.h"
 //#include "proximity.h"
@@ -121,6 +122,7 @@ void systemInit(void)
   debugInit();
   crtpInit();
   consoleInit();
+  atkConsoleInit();
 
   /* DEBUG_PRINT("----------------------------\n");
   DEBUG_PRINT("%s is up and running!\n", platformConfigGetDeviceTypeName());

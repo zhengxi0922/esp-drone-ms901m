@@ -42,5 +42,8 @@ bool sensorsAtkMs901mReadBaro(baro_t *baro);
 void sensorsAtkMs901mSetAccMode(accModes accMode);
 bool sensorsAtkMs901mGetAttitude(attitude_t *attitude);
 bool sensorsAtkMs901mGetQuaternion(quaternion_t *quaternion);
+bool sensorsAtkMs901mReadReg(uint8_t id, uint8_t *data, uint8_t *len, uint32_t timeout_ms);
+bool sensorsAtkMs901mWriteReg(uint8_t id, const uint8_t *data, uint8_t len);
+int sensorsAtkMs901mRawTransfer(const uint8_t *tx, uint8_t tx_len, uint8_t *rx, uint8_t rx_len, uint32_t timeout_ms);
 
 #endif // __SENSORS_ATK_MS901M_H__

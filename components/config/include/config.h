@@ -119,6 +119,11 @@
 #define ENABLE_BUZZER 1
 #endif
 
+// USB-CDC ATK-MS901M console commands
+#ifndef ENABLE_ATK_USB_CONSOLE
+#define ENABLE_ATK_USB_CONSOLE 1
+#endif
+
 #if defined(CONFIG_TARGET_ESP32_S2_DRONE_V1_2) || defined(CONFIG_TARGET_ESP32_S3_DRONE_WROOM_1)
 #undef ATK_MS901M_UART_PORT_NUM
 #define ATK_MS901M_UART_PORT_NUM 0
@@ -259,6 +264,7 @@
 #define SYSLINK_TASK_PRI        2
 #define USBLINK_TASK_PRI        2
 #define WIFILINK_TASK_PRI       2
+#define ATK_CONSOLE_TASK_PRI    2
 #define CRTP_RX_TASK_PRI        2
 #define CMD_HIGH_LEVEL_TASK_PRI 3
 #define INFO_TASK_PRI           2
@@ -303,6 +309,7 @@
 #define UDP_TX_TASK_NAME        "UDP_TX"
 #define USBLINK_TASK_NAME       "USBLINK"
 #define WIFILINK_TASK_NAME      "WIFILINK"
+#define ATK_CONSOLE_TASK_NAME   "ATKCDC"
 #define ZRANGER2_TASK_NAME      "ZRANGER2"
 #define ZRANGER_TASK_NAME       "ZRANGER"
 
@@ -328,6 +335,7 @@
 #define UDP_TX_TASK_STACKSIZE         (4 * configBASE_STACK_SIZE)
 #define USBLINK_TASK_STACKSIZE        (1 * configBASE_STACK_SIZE)
 #define WIFILINK_TASK_STACKSIZE       (4 * configBASE_STACK_SIZE)
+#define ATK_CONSOLE_TASK_STACKSIZE    (2 * configBASE_STACK_SIZE)
 #define ZRANGER2_TASK_STACKSIZE       (4 * configBASE_STACK_SIZE)
 #define ZRANGER_TASK_STACKSIZE        (2 * configBASE_STACK_SIZE)
 

@@ -28,6 +28,7 @@
 #define DEBUG_MODULE "SENSORS"
 
 #include <math.h>
+#include <string.h>
 
 #include "FreeRTOS.h"
 #include "queue.h"
@@ -148,6 +149,10 @@ STATIC_MEM_QUEUE_ALLOC(barometerDataQueue, 1, sizeof(baro_t));
 static xSemaphoreHandle dataReady;
 static StaticSemaphore_t dataReadyBuffer;
 
+static xSemaphoreHandle atkUartMutex;
+static StaticSemaphore_t atkUartMutexBuffer;
+static volatile bool atkParserResetPending = false;
+
 static bool isInit = false;
 static bool isMs901mPresent = false;
 static bool gyroBiasFound = false;
@@ -170,6 +175,10 @@ static float sinRoll;
 
 STATIC_MEM_TASK_ALLOC(sensorsTask, SENSORS_TASK_STACKSIZE);
 
+static void atk_ms901m_uart_lock(void);
+static void atk_ms901m_uart_unlock(void);
+static bool atk_ms901m_uart_try_lock(TickType_t wait_ticks);
+static void atk_ms901m_request_parser_reset(void);
 static void atk_ms901m_parser_reset(atk_ms901m_parser_t *parser);
 static bool atk_ms901m_parser_feed(atk_ms901m_parser_t *parser, uint8_t dat, atk_ms901m_frame_t *out);
 static uint8_t atk_ms901m_read_reg_by_id(uint8_t id, uint8_t *dat, uint32_t timeout_ms);
@@ -206,6 +215,36 @@ static void atk_ms901m_uart_init(void)
                UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
   uart_driver_install(ATK_MS901M_UART_PORT, ATK_MS901M_UART_RX_BUF_SIZE, 0, 0, NULL, 0);
   uart_flush_input(ATK_MS901M_UART_PORT);
+}
+
+static void atk_ms901m_uart_lock(void)
+{
+  if (atkUartMutex)
+  {
+    xSemaphoreTake(atkUartMutex, portMAX_DELAY);
+  }
+}
+
+static void atk_ms901m_uart_unlock(void)
+{
+  if (atkUartMutex)
+  {
+    xSemaphoreGive(atkUartMutex);
+  }
+}
+
+static bool atk_ms901m_uart_try_lock(TickType_t wait_ticks)
+{
+  if (!atkUartMutex)
+  {
+    return true;
+  }
+  return (xSemaphoreTake(atkUartMutex, wait_ticks) == pdTRUE);
+}
+
+static void atk_ms901m_request_parser_reset(void)
+{
+  atkParserResetPending = true;
 }
 
 /**
@@ -494,7 +533,19 @@ static void sensorsTask(void *param)
 
   while (1)
   {
+    if (atkParserResetPending)
+    {
+      atk_ms901m_parser_reset(&parser);
+      atkParserResetPending = false;
+    }
+
+    if (!atk_ms901m_uart_try_lock(M2T(1)))
+    {
+      vTaskDelay(M2T(1));
+      continue;
+    }
     int len = uart_read_bytes(ATK_MS901M_UART_PORT, rxbuf, sizeof(rxbuf), M2T(10));
+    atk_ms901m_uart_unlock();
     if (len <= 0)
     {
       continue;
@@ -610,6 +661,8 @@ void sensorsAtkMs901mInit(void)
   {
     return;
   }
+
+  atkUartMutex = xSemaphoreCreateMutexStatic(&atkUartMutexBuffer);
 
   // 先初始化 UART，确保读写寄存器可用。
   atk_ms901m_uart_init();
@@ -917,6 +970,81 @@ static void applyAxis3fLpf(lpf2pData *data, Axis3f *in)
   {
     in->axis[i] = lpf2pApply(&data[i], in->axis[i]);
   }
+}
+
+bool sensorsAtkMs901mReadReg(uint8_t id, uint8_t *data, uint8_t *len, uint32_t timeout_ms)
+{
+  uint8_t tmp[ATK_MS901M_FRAME_DAT_MAX_SIZE];
+
+  if (!isInit || (data == NULL) || (len == NULL))
+  {
+    return false;
+  }
+
+  atk_ms901m_uart_lock();
+  uint8_t read_len = atk_ms901m_read_reg_by_id(id, tmp, timeout_ms);
+  atk_ms901m_request_parser_reset();
+  atk_ms901m_uart_unlock();
+
+  if (read_len == 0)
+  {
+    *len = 0;
+    return false;
+  }
+
+  if (read_len > ATK_MS901M_FRAME_DAT_MAX_SIZE)
+  {
+    read_len = ATK_MS901M_FRAME_DAT_MAX_SIZE;
+  }
+
+  memcpy(data, tmp, read_len);
+  *len = read_len;
+  return true;
+}
+
+bool sensorsAtkMs901mWriteReg(uint8_t id, const uint8_t *data, uint8_t len)
+{
+  if (!isInit || (data == NULL) || (len == 0) || (len > 2))
+  {
+    return false;
+  }
+
+  atk_ms901m_uart_lock();
+  atk_ms901m_write_reg_by_id(id, len, data);
+  atk_ms901m_request_parser_reset();
+  atk_ms901m_uart_unlock();
+  return true;
+}
+
+int sensorsAtkMs901mRawTransfer(const uint8_t *tx, uint8_t tx_len, uint8_t *rx, uint8_t rx_len, uint32_t timeout_ms)
+{
+  int total = 0;
+  int64_t deadline = (int64_t)usecTimestamp() + ((int64_t)timeout_ms * 1000);
+
+  if (!isInit || (rx == NULL) || (rx_len == 0))
+  {
+    return -1;
+  }
+
+  atk_ms901m_uart_lock();
+  uart_flush_input(ATK_MS901M_UART_PORT);
+  if ((tx != NULL) && (tx_len > 0))
+  {
+    uart_write_bytes(ATK_MS901M_UART_PORT, (const char *)tx, tx_len);
+  }
+
+  while ((total < rx_len) && ((int64_t)usecTimestamp() < deadline))
+  {
+    int len = uart_read_bytes(ATK_MS901M_UART_PORT, rx + total, rx_len - total, M2T(10));
+    if (len > 0)
+    {
+      total += len;
+    }
+  }
+
+  atk_ms901m_request_parser_reset();
+  atk_ms901m_uart_unlock();
+  return total;
 }
 
 PARAM_GROUP_START(imu_sensors)
