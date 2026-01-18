@@ -45,23 +45,56 @@
 
 // ATK-MS901M integration (single place to tune defaults)
 #ifndef USE_ATK_MS901M
-#define USE_ATK_MS901M 0  // 0: discrete sensors, 1: ATK-MS901M module
+#define USE_ATK_MS901M 1  // 0: discrete sensors, 1: ATK-MS901M module
 #endif
 
 #ifndef ATK_MS901M_UART_PORT_NUM
-#define ATK_MS901M_UART_PORT_NUM 1  // UART port for module
+#define ATK_MS901M_UART_PORT_NUM 0  // UART port for module
 #endif
 #ifndef ATK_MS901M_UART_TX_PIN
-#define ATK_MS901M_UART_TX_PIN 17  // 榛樿鍗犱綅锛屽悗闈㈡寜鏉垮瀷瑕嗙洊
+#define ATK_MS901M_UART_TX_PIN 43  // 榛樿鍗犱綅锛屽悗闈㈡寜鏉垮瀷瑕嗙洊
 #endif
 #ifndef ATK_MS901M_UART_RX_PIN
-#define ATK_MS901M_UART_RX_PIN 18  // 榛樿鍗犱綅锛屽悗闈㈡寜鏉垮瀷瑕嗙洊
+#define ATK_MS901M_UART_RX_PIN 44  // 榛樿鍗犱綅锛屽悗闈㈡寜鏉垮瀷瑕嗙洊
 #endif
 #ifndef ATK_MS901M_UART_BAUDRATE
 #define ATK_MS901M_UART_BAUDRATE 115200
 #endif
 #ifndef ATK_MS901M_UART_RX_BUF_SIZE
-#define ATK_MS901M_UART_RX_BUF_SIZE 256
+#define ATK_MS901M_UART_RX_BUF_SIZE 1024
+#endif
+#ifndef ATK_MS901M_BOOT_DELAY_MS
+#define ATK_MS901M_BOOT_DELAY_MS 100  // delay before first register read
+#endif
+#ifndef ATK_MS901M_SKIP_SYSTEM_WAIT
+#define ATK_MS901M_SKIP_SYSTEM_WAIT 1  // run sensor UART task before systemStart
+#endif
+#ifndef ATK_MS901M_ECHO_PC_TX
+#define ATK_MS901M_ECHO_PC_TX 0  // echo PC->ATK TX bytes on USB-CDC console
+#endif
+#ifndef ATK_MS901M_DEBUG_RX
+#define ATK_MS901M_DEBUG_RX 0  // log ATK->ESP32 RX bytes
+#endif
+#ifndef ATK_MS901M_DEBUG_RX_MAX_BYTES
+#define ATK_MS901M_DEBUG_RX_MAX_BYTES 16
+#endif
+#ifndef ATK_MS901M_DEBUG_RX_INTERVAL_MS
+#define ATK_MS901M_DEBUG_RX_INTERVAL_MS 100  // 0 to log every RX chunk
+#endif
+#ifndef ATK_MS901M_CAL_DEBUG
+#define ATK_MS901M_CAL_DEBUG 1  // print calibration progress for ATK-MS901M
+#endif
+#ifndef ATK_MS901M_CAL_DEBUG_INTERVAL_MS
+#define ATK_MS901M_CAL_DEBUG_INTERVAL_MS 1000
+#endif
+#ifndef ATK_MS901M_GYRO_BIAS_LIGHT_WEIGHT
+#define ATK_MS901M_GYRO_BIAS_LIGHT_WEIGHT 1  // use fixed-sample gyro bias (faster, less strict)
+#endif
+#ifndef ATK_MS901M_STREAM_1HZ
+#define ATK_MS901M_STREAM_1HZ 0  // print sensor data periodically on USB-CDC
+#endif
+#ifndef ATK_MS901M_STREAM_INTERVAL_MS
+#define ATK_MS901M_STREAM_INTERVAL_MS 1000
 #endif
 
 #ifndef ATK_MS901M_APPLY_CONFIG
@@ -126,14 +159,14 @@
 
 #if defined(CONFIG_TARGET_ESP32_S2_DRONE_V1_2) || defined(CONFIG_TARGET_ESP32_S3_DRONE_WROOM_1)
 #undef ATK_MS901M_UART_PORT_NUM
-#define ATK_MS901M_UART_PORT_NUM 0
+#define ATK_MS901M_UART_PORT_NUM 1
 
 #undef USE_DECK_I2C
 #define USE_DECK_I2C 0
 #undef ATK_MS901M_UART_TX_PIN
 #undef ATK_MS901M_UART_RX_PIN
-#define ATK_MS901M_UART_TX_PIN 36  // IO36 -> ATK_MS901M RX
-#define ATK_MS901M_UART_RX_PIN 37  // IO37 <- ATK_MS901M TX
+#define ATK_MS901M_UART_TX_PIN 43  // IO43 -> ATK-MS901M RX
+#define ATK_MS901M_UART_RX_PIN 44  // IO44 <- ATK-MS901M TX
 #undef ENABLE_BUZZER
 #define ENABLE_BUZZER 0
 #endif
@@ -247,6 +280,24 @@
 
 
 //#define DEBUG_UDP
+#ifndef WIFI_UDP_DIAG_PING
+#define WIFI_UDP_DIAG_PING 1  // respond to UDP diagnostic ping (CFPING/CFPONG)
+#endif
+#ifndef WIFI_UDP_DIAG_LOG_INTERVAL_MS
+#define WIFI_UDP_DIAG_LOG_INTERVAL_MS 1000  // 0 to log every diag ping
+#endif
+#ifndef WIFI_UDP_LASTPKT_LOG_INTERVAL_MS
+#define WIFI_UDP_LASTPKT_LOG_INTERVAL_MS 1000  // 0 to log every valid UDP packet
+#endif
+#ifndef CRTP_SETPOINT_LOG_INTERVAL_MS
+#define CRTP_SETPOINT_LOG_INTERVAL_MS 500  // 0 to log every setpoint packet
+#endif
+#ifndef STABILIZER_STATUS_LOG_INTERVAL_MS
+#define STABILIZER_STATUS_LOG_INTERVAL_MS 1000  // 0 to disable stabilizer status logs
+#endif
+#ifndef FORCE_SYSTEM_START
+#define FORCE_SYSTEM_START 1  // force systemStart even if selftest fails
+#endif
 //#define DEBUG_EP2
 
 // Task priorities. Higher number higher priority
@@ -335,7 +386,7 @@
 #define UDP_TX_TASK_STACKSIZE         (4 * configBASE_STACK_SIZE)
 #define USBLINK_TASK_STACKSIZE        (1 * configBASE_STACK_SIZE)
 #define WIFILINK_TASK_STACKSIZE       (4 * configBASE_STACK_SIZE)
-#define ATK_CONSOLE_TASK_STACKSIZE    (2 * configBASE_STACK_SIZE)
+#define ATK_CONSOLE_TASK_STACKSIZE    (4 * configBASE_STACK_SIZE)
 #define ZRANGER2_TASK_STACKSIZE       (4 * configBASE_STACK_SIZE)
 #define ZRANGER_TASK_STACKSIZE        (2 * configBASE_STACK_SIZE)
 

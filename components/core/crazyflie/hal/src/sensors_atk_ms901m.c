@@ -28,7 +28,9 @@
 #define DEBUG_MODULE "SENSORS"
 
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
+#include <inttypes.h>
 
 #include "FreeRTOS.h"
 #include "queue.h"
@@ -44,11 +46,23 @@
 #include "log.h"
 #include "filter.h"
 #include "config.h"
+#if ATK_MS901M_GYRO_BIAS_LIGHT_WEIGHT
+#ifndef GYRO_BIAS_LIGHT_WEIGHT
+#define GYRO_BIAS_LIGHT_WEIGHT
+#endif
+#endif
 #include "usec_time.h"
 #include "static_mem.h"
 #include "debug_cf.h"
 
 #include "imu.h"
+
+#ifndef PITCH_CALIB
+#define PITCH_CALIB (CONFIG_PITCH_CALIB * 1.0f / 100.0f)
+#endif
+#ifndef ROLL_CALIB
+#define ROLL_CALIB (CONFIG_ROLL_CALIB * 1.0f / 100.0f)
+#endif
 
 #define ATK_MS901M_FRAME_HEAD_L             0x55
 #define ATK_MS901M_FRAME_HEAD_UPLOAD_H      0x55
@@ -156,12 +170,22 @@ static volatile bool atkParserResetPending = false;
 static bool isInit = false;
 static bool isMs901mPresent = false;
 static bool gyroBiasFound = false;
+static uint32_t gyroBiasSampleCount = 0;
 static float accScaleSum = 0;
 static float accScale = 1;
 
 static sensorData_t sensorData;
 static Axis3i16 gyroRaw;
 static Axis3i16 accelRaw;
+static attitude_t attitudeData;
+static quaternion_t quaternionData;
+static bool attitudeValid = false;
+static bool quaternionValid = false;
+#if ATK_MS901M_STREAM_1HZ
+static bool gyroAccValid = false;
+static bool magValid = false;
+static bool baroValid = false;
+#endif
 static BiasObj gyroBiasRunning;
 static Axis3f gyroBias;
 
@@ -172,6 +196,17 @@ static float cosPitch;
 static float sinPitch;
 static float cosRoll;
 static float sinRoll;
+
+#if ATK_MS901M_CAL_DEBUG
+static uint32_t atkCalLastLogTick = 0;
+static uint32_t atkRxBytes = 0;
+static uint32_t atkRxFrames = 0;
+static uint32_t atkRxGyroFrames = 0;
+static uint8_t atkLastFrameId = 0;
+static uint8_t atkLastFrameLen = 0;
+static Axis3i16 atkLastGyroRaw;
+static Axis3i16 atkLastAccRaw;
+#endif
 
 STATIC_MEM_TASK_ALLOC(sensorsTask, SENSORS_TASK_STACKSIZE);
 
@@ -185,7 +220,9 @@ static uint8_t atk_ms901m_read_reg_by_id(uint8_t id, uint8_t *dat, uint32_t time
 static void atk_ms901m_write_reg_by_id(uint8_t id, uint8_t len, const uint8_t *dat);
 static void sensorsBiasObjInit(BiasObj *bias);
 static bool processGyroBias(int16_t gx, int16_t gy, int16_t gz, Axis3f *gyroBiasOut);
+#ifdef GYRO_BIAS_LIGHT_WEIGHT
 static bool processGyroBiasNoBuffer(int16_t gx, int16_t gy, int16_t gz, Axis3f *gyroBiasOut);
+#endif
 static bool processAccScale(int16_t ax, int16_t ay, int16_t az);
 static void sensorsCalculateVarianceAndMean(BiasObj *bias, Axis3f *varOut, Axis3f *meanOut);
 static void sensorsAddBiasValue(BiasObj *bias, int16_t x, int16_t y, int16_t z);
@@ -196,19 +233,18 @@ static void mapAxesI16(int16_t in_x, int16_t in_y, int16_t in_z, Axis3i16 *out);
 static void sensorsTask(void *param);
 
 /**
- * 初始化 ATK-MS901M 的 UART 通道。
- * 配置波特率/数据格式/引脚/缓冲区，并清空接收缓冲。
- */
+ * 初始�?ATK-MS901M �?UART 通道�? * 配置波特�?数据格式/引脚/缓冲区，并清空接收缓冲�? */
 static void atk_ms901m_uart_init(void)
 {
   uart_config_t uart_config = {0};
 
-  // 配置 UART 参数用于 ATK-MS901M 通讯。
+  // 配置 UART 参数用于 ATK-MS901M 通讯�?
   uart_config.baud_rate = ATK_MS901M_UART_BAUDRATE;
   uart_config.data_bits = UART_DATA_8_BITS;
   uart_config.parity = UART_PARITY_DISABLE;
   uart_config.stop_bits = UART_STOP_BITS_1;
   uart_config.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+  uart_config.source_clk = UART_SCLK_DEFAULT;
 
   uart_param_config(ATK_MS901M_UART_PORT, &uart_config);
   uart_set_pin(ATK_MS901M_UART_PORT, ATK_MS901M_UART_TX_PIN, ATK_MS901M_UART_RX_PIN,
@@ -247,53 +283,65 @@ static void atk_ms901m_request_parser_reset(void)
   atkParserResetPending = true;
 }
 
+bool sensorsAtkMs901mGetAttitude(attitude_t *attitude)
+{
+  if ((attitude == NULL) || !attitudeValid)
+  {
+    return false;
+  }
+
+  *attitude = attitudeData;
+  return true;
+}
+
+bool sensorsAtkMs901mGetQuaternion(quaternion_t *quaternion)
+{
+  if ((quaternion == NULL) || !quaternionValid)
+  {
+    return false;
+  }
+
+  *quaternion = quaternionData;
+  return true;
+}
+
 /**
- * 读取陀螺仪数据（非阻塞）。
- * 队列有新数据则返回 true，否则返回 false。
- */
+ * 读取陀螺仪数据（非阻塞）�? * 队列有新数据则返�?true，否则返�?false�? */
 bool sensorsAtkMs901mReadGyro(Axis3f *gyro)
 {
-  // 非阻塞读取陀螺仪队列，有新数据则返回 true。
+  // 非阻塞读取陀螺仪队列，有新数据则返回 true�?
   return (pdTRUE == xQueueReceive(gyroDataQueue, gyro, 0));
 }
 
 /**
- * 读取加速度计数据（非阻塞）。
- * 队列有新数据则返回 true，否则返回 false。
- */
+ * 读取加速度计数据（非阻塞）�? * 队列有新数据则返�?true，否则返�?false�? */
 bool sensorsAtkMs901mReadAcc(Axis3f *acc)
 {
-  // 非阻塞读取加速度计队列，有新数据则返回 true。
+  // 非阻塞读取加速度计队列，有新数据则返�?true�?
   return (pdTRUE == xQueueReceive(accelerometerDataQueue, acc, 0));
 }
 
 /**
- * 读取磁力计数据（非阻塞）。
- * 队列有新数据则返回 true，否则返回 false。
- */
+ * 读取磁力计数据（非阻塞）�? * 队列有新数据则返�?true，否则返�?false�? */
 bool sensorsAtkMs901mReadMag(Axis3f *mag)
 {
-  // 非阻塞读取磁力计队列，有新数据则返回 true。
+  // 非阻塞读取磁力计队列，有新数据则返回 true�?
   return (pdTRUE == xQueueReceive(magnetometerDataQueue, mag, 0));
 }
 
 /**
- * 读取气压计数据（非阻塞）。
- * 队列有新数据则返回 true，否则返回 false。
- */
+ * 读取气压计数据（非阻塞）�? * 队列有新数据则返�?true，否则返�?false�? */
 bool sensorsAtkMs901mReadBaro(baro_t *baro)
 {
-  // 非阻塞读取气压计队列，有新数据则返回 true。
+  // 非阻塞读取气压计队列，有新数据则返回 true�?
   return (pdTRUE == xQueueReceive(barometerDataQueue, baro, 0));
 }
 
 /**
- * 读取当前传感器数据并填充上层结构体。
- * tick 参数目前未使用，仅保持接口一致性。
- */
+ * 读取当前传感器数据并填充上层结构体�? * tick 参数目前未使用，仅保持接口一致性�? */
 void sensorsAtkMs901mAcquire(sensorData_t *sensors, const uint32_t tick)
 {
-  // 通过统一的读取接口获取各传感器数据。
+  // 通过统一的读取接口获取各传感器数据�?
   sensorsReadGyro(&sensors->gyro);
   sensorsReadAcc(&sensors->acc);
   sensorsReadMag(&sensors->mag);
@@ -302,17 +350,46 @@ void sensorsAtkMs901mAcquire(sensorData_t *sensors, const uint32_t tick)
 }
 
 /**
- * 判断传感器是否完成标定（当前以陀螺仪零偏为准）。
- */
+ * 判断传感器是否完成标定（当前以陀螺仪零偏为准）�? */
 bool sensorsAtkMs901mAreCalibrated(void)
 {
   return gyroBiasFound;
 }
 
+#if ATK_MS901M_CAL_DEBUG
+static void atkCalMaybeLog(void)
+{
+  if (ATK_MS901M_CAL_DEBUG_INTERVAL_MS == 0)
+  {
+    return;
+  }
+
+  uint32_t now = xTaskGetTickCount();
+  if ((now - atkCalLastLogTick) < M2T(ATK_MS901M_CAL_DEBUG_INTERVAL_MS))
+  {
+    return;
+  }
+
+  atkCalLastLogTick = now;
+  DEBUG_PRINTI("ATK CAL: rxBytes=%"PRIu32" frames=%"PRIu32" gyroFrames=%"PRIu32" gyroSamples=%"PRIu32" biasFound=%d lastId=0x%02X len=%u accRaw=%d,%d,%d gyroRaw=%d,%d,%d\n",
+               atkRxBytes,
+               atkRxFrames,
+               atkRxGyroFrames,
+               gyroBiasSampleCount,
+               gyroBiasFound ? 1 : 0,
+               atkLastFrameId,
+               (unsigned int)atkLastFrameLen,
+               (int)atkLastAccRaw.x,
+               (int)atkLastAccRaw.y,
+               (int)atkLastAccRaw.z,
+               (int)atkLastGyroRaw.x,
+               (int)atkLastGyroRaw.y,
+               (int)atkLastGyroRaw.z);
+}
+#endif
+
 /**
- * 重置帧解析器状态机。
- * 清空状态、索引与校验和，准备解析新帧。
- */
+ * 重置帧解析器状态机�? * 清空状态、索引与校验和，准备解析新帧�? */
 static void atk_ms901m_parser_reset(atk_ms901m_parser_t *parser)
 {
   parser->state = wait_for_head_l;
@@ -321,15 +398,13 @@ static void atk_ms901m_parser_reset(atk_ms901m_parser_t *parser)
 }
 
 /**
- * 按字节喂入数据并尝试解析出完整帧。
- * 返回 true 表示解析到一帧且校验通过，out 填充该帧内容。
- */
+ * 按字节喂入数据并尝试解析出完整帧�? * 返回 true 表示解析到一帧且校验通过，out 填充该帧内容�? */
 static bool atk_ms901m_parser_feed(atk_ms901m_parser_t *parser, uint8_t dat, atk_ms901m_frame_t *out)
 {
   switch (parser->state)
   {
     case wait_for_head_l:
-      // 等待帧头低字节
+      // 等待帧头低字�?
       if (dat == ATK_MS901M_FRAME_HEAD_L)
       {
         parser->frame.check_sum = dat;
@@ -337,7 +412,7 @@ static bool atk_ms901m_parser_feed(atk_ms901m_parser_t *parser, uint8_t dat, atk
       }
       break;
     case wait_for_head_h:
-      // 等待帧头高字节（上传/应答）
+      // 等待帧头高字节（上传/应答�?
       if ((dat == ATK_MS901M_FRAME_HEAD_UPLOAD_H) || (dat == ATK_MS901M_FRAME_HEAD_ACK_H))
       {
         parser->frame.head_h = dat;
@@ -350,13 +425,13 @@ static bool atk_ms901m_parser_feed(atk_ms901m_parser_t *parser, uint8_t dat, atk
       }
       break;
     case wait_for_id:
-      // 读取帧 ID
+      // 读取�?ID
       parser->frame.id = dat;
       parser->frame.check_sum += dat;
       parser->state = wait_for_len;
       break;
     case wait_for_len:
-      // 读取数据长度并校验合法性
+      // 读取数据长度并校验合法�?
       if (dat > ATK_MS901M_FRAME_DAT_MAX_SIZE)
       {
         parser->state = wait_for_head_l;
@@ -375,7 +450,7 @@ static bool atk_ms901m_parser_feed(atk_ms901m_parser_t *parser, uint8_t dat, atk
       }
       break;
     case wait_for_dat:
-      // 读取数据域
+      // 读取数据�?
       parser->frame.dat[parser->dat_index] = dat;
       parser->frame.check_sum += dat;
       parser->dat_index++;
@@ -385,7 +460,7 @@ static bool atk_ms901m_parser_feed(atk_ms901m_parser_t *parser, uint8_t dat, atk
       }
       break;
     case wait_for_sum:
-      // 校验校验和
+      // 校验校验�?
       if (dat == parser->frame.check_sum)
       {
         *out = parser->frame;
@@ -403,9 +478,7 @@ static bool atk_ms901m_parser_feed(atk_ms901m_parser_t *parser, uint8_t dat, atk
 }
 
 /**
- * 通过寄存器 ID 读取模块配置。
- * 发送读寄存器请求并等待 ACK 帧返回，成功返回长度。
- */
+ * 通过寄存�?ID 读取模块配置�? * 发送读寄存器请求并等待 ACK 帧返回，成功返回长度�? */
 static uint8_t atk_ms901m_read_reg_by_id(uint8_t id, uint8_t *dat, uint32_t timeout_ms)
 {
   uint8_t buf[6];
@@ -421,7 +494,7 @@ static uint8_t atk_ms901m_read_reg_by_id(uint8_t id, uint8_t *dat, uint32_t time
   buf[4] = 0x00;
   buf[5] = (uint8_t)(buf[0] + buf[1] + buf[2] + buf[3] + buf[4]);
 
-  // 发送读寄存器请求并等待 ACK 帧。
+  // 发送读寄存器请求并等待 ACK 帧�?
   uart_flush_input(ATK_MS901M_UART_PORT);
   uart_write_bytes(ATK_MS901M_UART_PORT, (const char *)buf, sizeof(buf));
 
@@ -441,7 +514,13 @@ static uint8_t atk_ms901m_read_reg_by_id(uint8_t id, uint8_t *dat, uint32_t time
         continue;
       }
 
-      // 只接受 ACK 帧且 ID 匹配
+#if ATK_MS901M_CAL_DEBUG
+      atkRxFrames++;
+      atkLastFrameId = frame.id;
+      atkLastFrameLen = frame.len;
+#endif
+
+      // 只接�?ACK 帧且 ID 匹配
       if (frame.head_h != ATK_MS901M_FRAME_HEAD_ACK_H)
       {
         continue;
@@ -465,9 +544,7 @@ static uint8_t atk_ms901m_read_reg_by_id(uint8_t id, uint8_t *dat, uint32_t time
 }
 
 /**
- * 通过寄存器 ID 写入模块配置。
- * 支持 1~2 字节写入；长度不合法则直接返回。
- */
+ * 通过寄存�?ID 写入模块配置�? * 支持 1~2 字节写入；长度不合法则直接返回�? */
 static void atk_ms901m_write_reg_by_id(uint8_t id, uint8_t len, const uint8_t *dat)
 {
   uint8_t buf[7];
@@ -477,7 +554,7 @@ static void atk_ms901m_write_reg_by_id(uint8_t id, uint8_t len, const uint8_t *d
     return;
   }
 
-  // 组包写寄存器帧并计算校验和。
+  // 组包写寄存器帧并计算校验和�?
   buf[0] = ATK_MS901M_FRAME_HEAD_L;
   buf[1] = ATK_MS901M_FRAME_HEAD_ACK_H;
   buf[2] = id;
@@ -497,12 +574,10 @@ static void atk_ms901m_write_reg_by_id(uint8_t id, uint8_t len, const uint8_t *d
 }
 
 /**
- * 将模块输出的原始坐标映射到系统坐标系。
- * 支持 XY 交换与 X 轴反向配置。
- */
+ * 将模块输出的原始坐标映射到系统坐标系�? * 支持 XY 交换�?X 轴反向配置�? */
 static void mapAxesI16(int16_t in_x, int16_t in_y, int16_t in_z, Axis3i16 *out)
 {
-  // 根据编译期配置进行坐标轴交换与方向修正。
+  // 根据编译期配置进行坐标轴交换与方向修正�?
 #if ATK_MS901M_AXIS_SWAP_XY
   out->x = in_y;
   out->y = in_x;
@@ -517,10 +592,54 @@ static void mapAxesI16(int16_t in_x, int16_t in_y, int16_t in_z, Axis3i16 *out)
 #endif
 }
 
+#if ATK_MS901M_STREAM_1HZ
+static void streamMaybePrint(void)
+{
+  static uint32_t lastStreamMs = 0;
+  uint32_t nowMs = (uint32_t)(usecTimestamp() / 1000);
+
+  if (ATK_MS901M_STREAM_INTERVAL_MS != 0)
+  {
+    if ((nowMs - lastStreamMs) < ATK_MS901M_STREAM_INTERVAL_MS)
+    {
+      return;
+    }
+  }
+  lastStreamMs = nowMs;
+
+  if (!gyroAccValid && !magValid && !baroValid)
+  {
+    DEBUG_PRINTI("ATK 1Hz: no data\n");
+    return;
+  }
+
+  if (gyroAccValid)
+  {
+    DEBUG_PRINTI("ATK 1Hz: acc[g]=%.3f %.3f %.3f gyro[dps]=%.3f %.3f %.3f\n",
+                 sensorData.acc.x, sensorData.acc.y, sensorData.acc.z,
+                 sensorData.gyro.x, sensorData.gyro.y, sensorData.gyro.z);
+  }
+  else
+  {
+    DEBUG_PRINTI("ATK 1Hz: acc/gyro: n/a\n");
+  }
+
+  if (magValid)
+  {
+    DEBUG_PRINTI("ATK 1Hz: mag[gauss]=%.3f %.3f %.3f\n",
+                 sensorData.mag.x, sensorData.mag.y, sensorData.mag.z);
+  }
+
+  if (baroValid)
+  {
+    DEBUG_PRINTI("ATK 1Hz: baro[mbar]=%.2f t=%.2fC alt=%.2fm\n",
+                 sensorData.baro.pressure, sensorData.baro.temperature, sensorData.baro.asl);
+  }
+}
+#endif
+
 /**
- * ATK-MS901M 数据解析任务。
- * 解析模块上传帧，计算标定与滤波后数据，并写入各传感器队列。
- */
+ * ATK-MS901M 数据解析任务�? * 解析模块上传帧，计算标定与滤波后数据，并写入各传感器队列�? */
 static void sensorsTask(void *param)
 {
   atk_ms901m_parser_t parser = {0};
@@ -528,11 +647,16 @@ static void sensorsTask(void *param)
   uint8_t rxbuf[64];
   Axis3f accScaled;
 
+#if !ATK_MS901M_SKIP_SYSTEM_WAIT
   systemWaitStart();
+#endif
   atk_ms901m_parser_reset(&parser);
 
   while (1)
   {
+#if ATK_MS901M_STREAM_1HZ
+    streamMaybePrint();
+#endif
     if (atkParserResetPending)
     {
       atk_ms901m_parser_reset(&parser);
@@ -542,14 +666,23 @@ static void sensorsTask(void *param)
     if (!atk_ms901m_uart_try_lock(M2T(1)))
     {
       vTaskDelay(M2T(1));
+#if ATK_MS901M_CAL_DEBUG
+      atkCalMaybeLog();
+#endif
       continue;
     }
     int len = uart_read_bytes(ATK_MS901M_UART_PORT, rxbuf, sizeof(rxbuf), M2T(10));
     atk_ms901m_uart_unlock();
     if (len <= 0)
     {
+#if ATK_MS901M_CAL_DEBUG
+      atkCalMaybeLog();
+#endif
       continue;
     }
+#if ATK_MS901M_CAL_DEBUG
+    atkRxBytes += (uint32_t)len;
+#endif
 
     for (int i = 0; i < len; i++)
     {
@@ -558,7 +691,7 @@ static void sensorsTask(void *param)
         continue;
       }
 
-      // 仅处理模块上传帧。
+      // 仅处理模块上传帧�?
       if (frame.head_h != ATK_MS901M_FRAME_HEAD_UPLOAD_H)
       {
         continue;
@@ -568,7 +701,7 @@ static void sensorsTask(void *param)
 
       if (frame.id == ATK_MS901M_FRAME_ID_GYRO_ACCE && frame.len >= 12)
       {
-        // 解析加速度与陀螺仪数据并更新共享数据。
+        // 解析加速度与陀螺仪数据并更新共享数据�?
         int16_t ax = (int16_t)((frame.dat[1] << 8) | frame.dat[0]);
         int16_t ay = (int16_t)((frame.dat[3] << 8) | frame.dat[2]);
         int16_t az = (int16_t)((frame.dat[5] << 8) | frame.dat[4]);
@@ -579,13 +712,19 @@ static void sensorsTask(void *param)
         mapAxesI16(ax, ay, az, &accelRaw);
         mapAxesI16(gx, gy, gz, &gyroRaw);
 
+#if ATK_MS901M_CAL_DEBUG
+        atkRxGyroFrames++;
+        atkLastAccRaw = accelRaw;
+        atkLastGyroRaw = gyroRaw;
+#endif
+
 #ifdef GYRO_BIAS_LIGHT_WEIGHT
         gyroBiasFound = processGyroBiasNoBuffer(gyroRaw.x, gyroRaw.y, gyroRaw.z, &gyroBias);
 #else
         gyroBiasFound = processGyroBias(gyroRaw.x, gyroRaw.y, gyroRaw.z, &gyroBias);
 #endif
 
-        // 在陀螺仪零偏稳定后计算加速度计比例系数。
+        // 在陀螺仪零偏稳定后计算加速度计比例系数�?
         if (gyroBiasFound)
         {
           processAccScale(accelRaw.x, accelRaw.y, accelRaw.z);
@@ -610,10 +749,13 @@ static void sensorsTask(void *param)
         xQueueOverwrite(accelerometerDataQueue, &sensorData.acc);
         xQueueOverwrite(gyroDataQueue, &sensorData.gyro);
         xSemaphoreGive(dataReady);
+#if ATK_MS901M_STREAM_1HZ
+        gyroAccValid = true;
+#endif
       }
       else if (frame.id == ATK_MS901M_FRAME_ID_MAG && frame.len >= 8)
       {
-        // 磁力计原始数据，单位为 LSB。
+        // 磁力计原始数据，单位�?LSB�?
         Axis3i16 magRaw;
         int16_t mx = (int16_t)((frame.dat[1] << 8) | frame.dat[0]);
         int16_t my = (int16_t)((frame.dat[3] << 8) | frame.dat[2]);
@@ -625,10 +767,13 @@ static void sensorsTask(void *param)
         sensorData.mag.y = (float)magRaw.y / MAG_GAUSS_PER_LSB;
         sensorData.mag.z = (float)magRaw.z / MAG_GAUSS_PER_LSB;
         xQueueOverwrite(magnetometerDataQueue, &sensorData.mag);
+#if ATK_MS901M_STREAM_1HZ
+        magValid = true;
+#endif
       }
       else if (frame.id == ATK_MS901M_FRAME_ID_BARO && frame.len >= 10)
       {
-        // 气压数据：32 位气压/高度 + 16 位温度。
+        // 气压数据�?2 位气�?高度 + 16 位温度�?
         int32_t pressure = (int32_t)((frame.dat[3] << 24) | (frame.dat[2] << 16) | (frame.dat[1] << 8) | frame.dat[0]);
         int32_t altitude = (int32_t)((frame.dat[7] << 24) | (frame.dat[6] << 16) | (frame.dat[5] << 8) | frame.dat[4]);
         int16_t temp = (int16_t)((frame.dat[9] << 8) | frame.dat[8]);
@@ -637,24 +782,43 @@ static void sensorsTask(void *param)
         sensorData.baro.asl = (float)altitude / 100.0f;
         sensorData.baro.temperature = (float)temp / 100.0f;
         xQueueOverwrite(barometerDataQueue, &sensorData.baro);
+#if ATK_MS901M_STREAM_1HZ
+        baroValid = true;
+#endif
+      }
+      else if (frame.id == ATK_MS901M_FRAME_ID_ATTITUDE && frame.len >= 6)
+      {
+        attitudeData.roll = (float)((int16_t)((frame.dat[1] << 8) | frame.dat[0])) / 32768.0f * 180.0f;
+        attitudeData.pitch = (float)((int16_t)((frame.dat[3] << 8) | frame.dat[2])) / 32768.0f * 180.0f;
+        attitudeData.yaw = (float)((int16_t)((frame.dat[5] << 8) | frame.dat[4])) / 32768.0f * 180.0f;
+        attitudeData.timestamp = usecTimestamp();
+        attitudeValid = true;
+      }
+      else if (frame.id == ATK_MS901M_FRAME_ID_QUAT && frame.len >= 8)
+      {
+        quaternionData.q0 = (float)((int16_t)((frame.dat[1] << 8) | frame.dat[0])) / 32768.0f;
+        quaternionData.q1 = (float)((int16_t)((frame.dat[3] << 8) | frame.dat[2])) / 32768.0f;
+        quaternionData.q2 = (float)((int16_t)((frame.dat[5] << 8) | frame.dat[4])) / 32768.0f;
+        quaternionData.q3 = (float)((int16_t)((frame.dat[7] << 8) | frame.dat[6])) / 32768.0f;
+        quaternionData.timestamp = usecTimestamp();
+        quaternionValid = true;
       }
     }
+#if ATK_MS901M_CAL_DEBUG
+    atkCalMaybeLog();
+#endif
   }
 }
 
 /**
- * 等待新一帧陀螺仪/加速度计数据到达。
- * 通过信号量阻塞等待，确保上层同步读取。
- */
+ * 等待新一帧陀螺仪/加速度计数据到达�? * 通过信号量阻塞等待，确保上层同步读取�? */
 void sensorsAtkMs901mWaitDataReady(void)
 {
   xSemaphoreTake(dataReady, portMAX_DELAY);
 }
 
 /**
- * 初始化 ATK-MS901M 传感器接口。
- * 完成 UART 初始化、读取 FSR、配置回传、初始化滤波器与任务等。
- */
+ * 初始�?ATK-MS901M 传感器接口�? * 完成 UART 初始化、读�?FSR、配置回传、初始化滤波器与任务等�? */
 void sensorsAtkMs901mInit(void)
 {
   if (isInit)
@@ -664,8 +828,11 @@ void sensorsAtkMs901mInit(void)
 
   atkUartMutex = xSemaphoreCreateMutexStatic(&atkUartMutexBuffer);
 
-  // 先初始化 UART，确保读写寄存器可用。
+  // 先初始化 UART，确保读写寄存器可用�?
   atk_ms901m_uart_init();
+#if ATK_MS901M_BOOT_DELAY_MS > 0
+  vTaskDelay(M2T(ATK_MS901M_BOOT_DELAY_MS));
+#endif
 
   sensorsBiasObjInit(&gyroBiasRunning);
 
@@ -691,21 +858,21 @@ void sensorsAtkMs901mInit(void)
   }
 
 #if ATK_MS901M_APPLY_CONFIG
-  // 根据编译期配置设置回传内容与回传频率。
+  // 根据编译期配置设置回传内容与回传频率�?
   uint8_t returnset = ATK_MS901M_RETURNSET;
   uint8_t returnrate = ATK_MS901M_RETURNRATE;
   atk_ms901m_write_reg_by_id(ATK_MS901M_FRAME_ID_REG_RETURNSET, 1, &returnset);
   atk_ms901m_write_reg_by_id(ATK_MS901M_FRAME_ID_REG_RETURNRATE, 1, &returnrate);
 #endif
 
-  // 按模块采样率初始化各轴低通滤波器。
+  // 按模块采样率初始化各轴低通滤波器�?
   for (uint8_t i = 0; i < 3; i++)
   {
     lpf2pInit(&gyroLpf[i], ATK_MS901M_SAMPLE_RATE_HZ, GYRO_LPF_CUTOFF_FREQ);
     lpf2pInit(&accLpf[i], ATK_MS901M_SAMPLE_RATE_HZ, ACCEL_LPF_CUTOFF_FREQ);
   }
 
-  // 预计算姿态校准所需的三角函数项。
+  // 预计算姿态校准所需的三角函数项�?
   cosPitch = cosf(PITCH_CALIB * (float)M_PI / 180);
   sinPitch = sinf(PITCH_CALIB * (float)M_PI / 180);
   cosRoll = cosf(ROLL_CALIB * (float)M_PI / 180);
@@ -724,25 +891,21 @@ void sensorsAtkMs901mInit(void)
 }
 
 /**
- * 传感器自检：初始化完成且检测到模块即可认为通过。
- */
+ * 传感器自检：初始化完成且检测到模块即可认为通过�? */
 bool sensorsAtkMs901mTest(void)
 {
   return (isInit && isMs901mPresent);
 }
 
 /**
- * 产测用检测：仅判断模块是否存在。
- */
+ * 产测用检测：仅判断模块是否存在�? */
 bool sensorsAtkMs901mManufacturingTest(void)
 {
   return isMs901mPresent;
 }
 
 /**
- * 估计加速度计比例系数（标定重力）。
- * 对若干样本的加速度模长求平均，得到缩放系数。
- */
+ * 估计加速度计比例系数（标定重力）�? * 对若干样本的加速度模长求平均，得到缩放系数�? */
 static bool processAccScale(int16_t ax, int16_t ay, int16_t az)
 {
   static bool accBiasFound = false;
@@ -751,7 +914,7 @@ static bool processAccScale(int16_t ax, int16_t ay, int16_t az)
 
   if (!accBiasFound)
   {
-    // 累积加速度模长以估算比例系数。
+    // 累积加速度模长以估算比例系数�?
     accScaleSum += sqrtf(powf(ax * acc_scale, 2) + powf(ay * acc_scale, 2) + powf(az * acc_scale, 2));
     accScaleSumCount++;
 
@@ -767,28 +930,25 @@ static bool processAccScale(int16_t ax, int16_t ay, int16_t az)
 
 #ifdef GYRO_BIAS_LIGHT_WEIGHT
 /**
- * 轻量级陀螺仪零偏估计（不使用环形缓冲）。
- * 通过累积均值（可选方差）在固定样本数后给出偏置。
- */
+ * 轻量级陀螺仪零偏估计（不使用环形缓冲）�? * 通过累积均值（可选方差）在固定样本数后给出偏置�? */
 static bool processGyroBiasNoBuffer(int16_t gx, int16_t gy, int16_t gz, Axis3f *gyroBiasOut)
 {
-  static uint32_t gyroBiasSampleCount = 0;
   static bool gyroBiasNoBuffFound = false;
   static Axis3i64 gyroBiasSampleSum;
   static Axis3i64 gyroBiasSampleSumSquares;
 
   if (!gyroBiasNoBuffFound)
   {
-    // 累积求和用于估计均值偏置。
+    // 累积求和用于估计均值偏置�?
     gyroBiasSampleSum.x += gx;
     gyroBiasSampleSum.y += gy;
     gyroBiasSampleSum.z += gz;
 #ifdef SENSORS_GYRO_BIAS_CALCULATE_STDDEV
     gyroBiasSampleSumSquares.x += gx * gx;
-    gyroBiasSampleSumSquares.y += gy * gy;
-    gyroBiasSampleSumSquares.z += gz * gz;
+      gyroBiasSampleSumSquares.y += gy * gy;
+      gyroBiasSampleSumSquares.z += gz * gz;
 #endif
-    gyroBiasSampleCount += 1;
+      gyroBiasSampleCount += 1;
 
     if (gyroBiasSampleCount == SENSORS_BIAS_SAMPLES)
     {
@@ -803,12 +963,11 @@ static bool processGyroBiasNoBuffer(int16_t gx, int16_t gy, int16_t gz, Axis3f *
 }
 #else
 /**
- * 基于滑动窗口的陀螺仪零偏估计。
- * 使用方差阈值与时间门限判断零偏稳定。
- */
+ * 基于滑动窗口的陀螺仪零偏估计�? * 使用方差阈值与时间门限判断零偏稳定�? */
 static bool processGyroBias(int16_t gx, int16_t gy, int16_t gz, Axis3f *gyroBiasOut)
 {
-  // 用环形缓冲统计均值/方差以判断零偏稳定。
+  gyroBiasSampleCount += 1;
+  // 用环形缓冲统计均�?方差以判断零偏稳定�?
   sensorsAddBiasValue(&gyroBiasRunning, gx, gy, gz);
 
   if (!gyroBiasRunning.isBiasValueFound)
@@ -825,25 +984,23 @@ static bool processGyroBias(int16_t gx, int16_t gy, int16_t gz, Axis3f *gyroBias
 #endif
 
 /**
- * 初始化陀螺仪偏置统计结构。
- */
+ * 初始化陀螺仪偏置统计结构�? */
 static void sensorsBiasObjInit(BiasObj *bias)
 {
-  // 清空状态并重置环形缓冲头指针。
+  // 清空状态并重置环形缓冲头指针�?
   bias->isBufferFilled = false;
   bias->bufHead = bias->buffer;
 }
 
 /**
- * 计算环形缓冲中的均值与方差。
- */
+ * 计算环形缓冲中的均值与方差�? */
 static void sensorsCalculateVarianceAndMean(BiasObj *bias, Axis3f *varOut, Axis3f *meanOut)
 {
   uint32_t i;
   int64_t sum[GYRO_NBR_OF_AXES] = {0};
   int64_t sumSq[GYRO_NBR_OF_AXES] = {0};
 
-  // 逐轴累加样本和与平方和。
+  // 逐轴累加样本和与平方和�?
   for (i = 0; i < SENSORS_NBR_OF_BIAS_SAMPLES; i++)
   {
     sum[0] += bias->buffer[i].x;
@@ -864,11 +1021,10 @@ static void sensorsCalculateVarianceAndMean(BiasObj *bias, Axis3f *varOut, Axis3
 }
 
 /**
- * 向偏置缓冲区写入一个样本（环形缓冲）。
- */
+ * 向偏置缓冲区写入一个样本（环形缓冲）�? */
 static void sensorsAddBiasValue(BiasObj *bias, int16_t x, int16_t y, int16_t z)
 {
-  // 写入样本并判断是否回绕到缓冲区起始。
+  // 写入样本并判断是否回绕到缓冲区起始�?
   bias->bufHead->x = x;
   bias->bufHead->y = y;
   bias->bufHead->z = z;
@@ -882,9 +1038,7 @@ static void sensorsAddBiasValue(BiasObj *bias, int16_t x, int16_t y, int16_t z)
 }
 
 /**
- * 在环形缓冲填满后尝试检测稳定零偏。
- * 通过方差阈值与最小时间间隔判断是否有效。
- */
+ * 在环形缓冲填满后尝试检测稳定零偏�? * 通过方差阈值与最小时间间隔判断是否有效�? */
 static bool sensorsFindBiasValue(BiasObj *bias)
 {
   static int32_t varianceSampleTime;
@@ -894,7 +1048,7 @@ static bool sensorsFindBiasValue(BiasObj *bias)
   {
     sensorsCalculateVarianceAndMean(bias, &bias->variance, &bias->mean);
 
-    // 只有方差足够小且满足时间间隔才认定偏置稳定。
+    // 只有方差足够小且满足时间间隔才认定偏置稳定�?
     if (bias->variance.x < GYRO_VARIANCE_THRESHOLD_X &&
         bias->variance.y < GYRO_VARIANCE_THRESHOLD_Y &&
         bias->variance.z < GYRO_VARIANCE_THRESHOLD_Z &&
@@ -913,15 +1067,13 @@ static bool sensorsFindBiasValue(BiasObj *bias)
 }
 
 /**
- * 将加速度向量对齐到重力坐标系。
- * 按照 PITCH/ROLL 标定角对加速度进行旋转补偿。
- */
+ * 将加速度向量对齐到重力坐标系�? * 按照 PITCH/ROLL 标定角对加速度进行旋转补偿�? */
 static void sensorsAccAlignToGravity(Axis3f *in, Axis3f *out)
 {
   Axis3f rx;
   Axis3f ry;
 
-  // 先进行 roll 修正，再进行 pitch 修正。
+  // 先进�?roll 修正，再进行 pitch 修正�?
   rx.x = in->x;
   rx.y = in->y * cosRoll - in->z * sinRoll;
   rx.z = in->y * sinRoll + in->z * cosRoll;
@@ -936,14 +1088,13 @@ static void sensorsAccAlignToGravity(Axis3f *in, Axis3f *out)
 }
 
 /**
- * 设置加速度计工作模式（影响低通滤波截止频率）。
- */
+ * 设置加速度计工作模式（影响低通滤波截止频率）�? */
 void sensorsAtkMs901mSetAccMode(accModes accMode)
 {
   switch (accMode)
   {
     case ACC_MODE_PROPTEST:
-      // 桨叶测试模式使用更高的截止频率。
+      // 桨叶测试模式使用更高的截止频率�?
       for (uint8_t i = 0; i < 3; i++)
       {
         lpf2pInit(&accLpf[i], ATK_MS901M_SAMPLE_RATE_HZ, 250);
@@ -951,7 +1102,7 @@ void sensorsAtkMs901mSetAccMode(accModes accMode)
       break;
     case ACC_MODE_FLIGHT:
     default:
-      // 飞行模式使用默认低通滤波截止频率。
+      // 飞行模式使用默认低通滤波截止频率�?
       for (uint8_t i = 0; i < 3; i++)
       {
         lpf2pInit(&accLpf[i], ATK_MS901M_SAMPLE_RATE_HZ, ACCEL_LPF_CUTOFF_FREQ);
@@ -961,11 +1112,10 @@ void sensorsAtkMs901mSetAccMode(accModes accMode)
 }
 
 /**
- * 对 Axis3f 三轴数据应用二阶低通滤波。
- */
+ * �?Axis3f 三轴数据应用二阶低通滤波�? */
 static void applyAxis3fLpf(lpf2pData *data, Axis3f *in)
 {
-  // 逐轴就地滤波。
+  // 逐轴就地滤波�?
   for (uint8_t i = 0; i < 3; i++)
   {
     in->axis[i] = lpf2pApply(&data[i], in->axis[i]);
@@ -1054,3 +1204,6 @@ PARAM_GROUP_STOP(imu_sensors)
 PARAM_GROUP_START(imu_tests)
 PARAM_ADD(PARAM_UINT8 | PARAM_RONLY, MS901M, &isMs901mPresent)
 PARAM_GROUP_STOP(imu_tests)
+
+
+

@@ -117,7 +117,8 @@ void pmInit(void)
     return;
   }
 
-    pmEnableExtBatteryVoltMeasuring(CONFIG_ADC1_PIN, 2); // ADC1 PIN is fixed to ADC channel
+    // ADC1 pin (IO2) with 100k/100k divider -> ratio 2.0
+    pmEnableExtBatteryVoltMeasuring(CONFIG_ADC1_PIN, PM_BAT_DIVIDER);
 
     pmSyslinkInfo.pgood = false;
     pmSyslinkInfo.chg = false;
@@ -350,6 +351,8 @@ void pmTask(void *param)
     }
 
         pmState = pmUpdateState();
+        // Keep canFly in sync even if state does not change.
+        systemSetCanFly((pmState == battery) || (pmState == lowPower));
 
     if (pmState != pmStateOld)
     {

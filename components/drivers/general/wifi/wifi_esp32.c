@@ -9,6 +9,7 @@
 #include "esp_event.h"
 #include "esp_netif.h"
 #include "lwip/err.h"
+#include "lwip/inet.h"
 #include "lwip/sockets.h"
 #include "lwip/sys.h"
 #include "lwip/netdb.h"
@@ -134,6 +135,14 @@ static void udp_server_rx_task(void *pvParameters)
     socklen_t socklen = sizeof(source_addr);
     char rx_buffer[UDP_SERVER_BUFSIZE];
     UDPPacket inPacket = {0};
+#if WIFI_UDP_LASTPKT_LOG_INTERVAL_MS
+    static TickType_t lastSrcLogTick;
+#endif
+#if WIFI_UDP_DIAG_PING
+    static const char diag_ping[] = "CFPING";
+    static const char diag_pong[] = "CFPONG";
+    static TickType_t lastDiagLogTick;
+#endif
 
     while (true) {
         if(isUDPInit == false) {
@@ -156,8 +165,36 @@ static void udp_server_rx_task(void *pvParameters)
                 //copy part of the UDP packet, the size not include cksum
                 inPacket.size = len - 1;
                 memcpy(inPacket.data, rx_buffer, inPacket.size);
-                xQueueSend(udpDataRx, &inPacket, M2T(10));
                 if(!isUDPConnected) isUDPConnected = true;
+#if WIFI_UDP_LASTPKT_LOG_INTERVAL_MS
+                if ((WIFI_UDP_LASTPKT_LOG_INTERVAL_MS == 0) ||
+                    ((xTaskGetTickCount() - lastSrcLogTick) >= M2T(WIFI_UDP_LASTPKT_LOG_INTERVAL_MS))) {
+                    if (source_addr.ss_family == AF_INET) {
+                        struct sockaddr_in *addr = (struct sockaddr_in *)&source_addr;
+                        char ip_str[16];
+                        inet_ntoa_r(addr->sin_addr, ip_str, sizeof(ip_str));
+                        DEBUG_PRINT_LOCAL("UDP rx from %s:%u len=%d",
+                                          ip_str, (unsigned)ntohs(addr->sin_port), len);
+                    } else {
+                        DEBUG_PRINT_LOCAL("UDP rx from [af=%d] len=%d",
+                                          (int)source_addr.ss_family, len);
+                    }
+                    lastSrcLogTick = xTaskGetTickCount();
+                }
+#endif
+#if WIFI_UDP_DIAG_PING
+                if ((inPacket.size == (sizeof(diag_ping) - 1)) &&
+                    (memcmp(inPacket.data, diag_ping, sizeof(diag_ping) - 1) == 0)) {
+                    (void)wifiSendData(sizeof(diag_pong) - 1, (uint8_t *)diag_pong);
+                    if ((WIFI_UDP_DIAG_LOG_INTERVAL_MS == 0) ||
+                        ((xTaskGetTickCount() - lastDiagLogTick) >= M2T(WIFI_UDP_DIAG_LOG_INTERVAL_MS))) {
+                        DEBUG_PRINT_LOCAL("UDP diag pong");
+                        lastDiagLogTick = xTaskGetTickCount();
+                    }
+                    continue;
+                }
+#endif
+                xQueueSend(udpDataRx, &inPacket, M2T(10));
             }else{
                 DEBUG_PRINT_LOCAL("udp packet cksum unmatched");
             }

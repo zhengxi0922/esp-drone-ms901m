@@ -34,6 +34,7 @@
 #include "cfassert.h"
 #include "param.h"
 #include "static_mem.h"
+#include "worker.h"
 
 #include "sysload.h"
 #include "stm32_legacy.h"
@@ -46,6 +47,7 @@ static void timerHandler(xTimerHandle timer);
 
 static bool initialized = false;
 static uint8_t triggerDump = 1;
+static volatile bool dumpScheduled = false;
 
 typedef struct {
   uint32_t ulRunTimeCounter;
@@ -54,6 +56,7 @@ typedef struct {
 
 #define TASK_MAX_COUNT 32
 NO_DMA_CCM_SAFE_ZERO_INIT static taskData_t previousSnapshot[TASK_MAX_COUNT];
+NO_DMA_CCM_SAFE_ZERO_INIT static TaskStatus_t taskStats[TASK_MAX_COUNT];
 static int taskTopIndex = 0;
 static uint32_t previousTotalRunTime = 0;
 
@@ -87,38 +90,51 @@ static taskData_t* getPreviousTaskData(uint32_t xTaskNumber) {
   return result;
 }
 
+static void sysloadDumpWorker(void *arg) {
+  (void)arg;
+  dumpScheduled = false;
+
+  if (triggerDump == 0) {
+    return;
+  }
+
+  uint32_t totalRunTime;
+  uint32_t taskCount = uxTaskGetSystemState(taskStats, TASK_MAX_COUNT, &totalRunTime);
+  ASSERT(taskCount < TASK_MAX_COUNT);
+
+  uint32_t totalDelta = totalRunTime - previousTotalRunTime;
+  float f = 100.0f / totalDelta;
+
+  // Dumps the the CPU load and stack usage for all tasks
+  // CPU usage is since last dump in % compared to total time spent in tasks. Note that time spent in interrupts will be included in measured time.
+  // Stack usage is displayed as nr of unused bytes at peak stack usage.
+  DEBUG_PRINTI("Task dump");
+  DEBUG_PRINTI("Load\tStack left\tName\tPRI");
+  for (uint32_t i = 0; i < taskCount; i++) {
+    TaskStatus_t* stats = &taskStats[i];
+    taskData_t* previousTaskData = getPreviousTaskData(stats->xTaskNumber);
+
+    uint32_t taskRunTime = stats->ulRunTimeCounter;
+    float load = f * (taskRunTime - previousTaskData->ulRunTimeCounter);
+    DEBUG_PRINTI("%.2f \t%"PRIu32" \t%s \t%d", (double)load, stats->usStackHighWaterMark, stats->pcTaskName, stats->uxBasePriority);
+
+    previousTaskData->ulRunTimeCounter = taskRunTime;
+  }
+
+  DEBUG_PRINTI("Free heap: %"PRIu32" bytes", xPortGetFreeHeapSize());
+  previousTotalRunTime = totalRunTime;
+
+  triggerDump = 0;
+}
+
 static void timerHandler(xTimerHandle timer) {
-  if (triggerDump != 0) {
-    uint32_t totalRunTime;
+  (void)timer;
+  if ((triggerDump == 0) || dumpScheduled) {
+    return;
+  }
 
-    TaskStatus_t taskStats[TASK_MAX_COUNT];
-    uint32_t taskCount = uxTaskGetSystemState(taskStats, TASK_MAX_COUNT, &totalRunTime);
-    ASSERT(taskCount < TASK_MAX_COUNT);
-
-    uint32_t totalDelta = totalRunTime - previousTotalRunTime;
-    float f = 100.0 / totalDelta;
-
-    // Dumps the the CPU load and stack usage for all tasks
-    // CPU usage is since last dump in % compared to total time spent in tasks. Note that time spent in interrupts will be included in measured time.
-    // Stack usage is displayed as nr of unused bytes at peak stack usage.
-
-    DEBUG_PRINTI("Task dump");
-    DEBUG_PRINTI("Load\tStack left\tName\tPRI");
-    for (uint32_t i = 0; i < taskCount; i++) {
-      TaskStatus_t* stats = &taskStats[i];
-      taskData_t* previousTaskData = getPreviousTaskData(stats->xTaskNumber);
-
-      uint32_t taskRunTime = stats->ulRunTimeCounter;
-      float load = f * (taskRunTime - previousTaskData->ulRunTimeCounter);
-      DEBUG_PRINTI("%.2f \t%"PRIu32" \t%s \t%d", (double)load, stats->usStackHighWaterMark, stats->pcTaskName,stats->uxBasePriority);
-
-      previousTaskData->ulRunTimeCounter = taskRunTime;
-    }
-
-    DEBUG_PRINTI("Free heap: %"PRIu32" bytes", xPortGetFreeHeapSize());
-    previousTotalRunTime = totalRunTime;
-
-    triggerDump = 0;
+  if (workerSchedule(sysloadDumpWorker, NULL) == 0) {
+    dumpScheduled = true;
   }
 }
 

@@ -66,6 +66,9 @@ static bool emergencyStop = false;
 static int emergencyStopTimeout = EMERGENCY_STOP_TIMEOUT_DISABLED;
 
 static bool checkStops;
+#if STABILIZER_STATUS_LOG_INTERVAL_MS
+static uint32_t lastStatusLogTick = 0;
+#endif
 
 #define PROPTEST_NBR_OF_VARIANCE_VALUES   100
 static bool startPropTest = false;
@@ -209,6 +212,34 @@ static void calcSensorToOutputLatency(const sensorData_t *sensorData)
   inToOutLatency = outTimestamp - sensorData->interruptTimestamp;
 }
 
+#if STABILIZER_STATUS_LOG_INTERVAL_MS
+static void logStabilizerStatus(const char *phase, uint32_t nowTick, bool isArmed, bool shouldStop)
+{
+  if ((nowTick - lastStatusLogTick) < M2T(STABILIZER_STATUS_LOG_INTERVAL_MS)) {
+    return;
+  }
+  lastStatusLogTick = nowTick;
+
+  DEBUG_PRINTI("Status[%s]: cal=%d canFly=%d armed=%d stop=%d eStop=%d spThr=%.0f ctrlThr=%.0f\n",
+               phase,
+               sensorsAreCalibrated() ? 1 : 0,
+               systemCanFly() ? 1 : 0,
+               isArmed ? 1 : 0,
+               shouldStop ? 1 : 0,
+               emergencyStop ? 1 : 0,
+               (double)setpoint.thrust,
+               (double)control.thrust);
+}
+#else
+static inline void logStabilizerStatus(const char *phase, uint32_t nowTick, bool isArmed, bool shouldStop)
+{
+  (void)phase;
+  (void)nowTick;
+  (void)isArmed;
+  (void)shouldStop;
+}
+#endif
+
 static void compressState()
 {
   stateCompressed.x = state.position.x * 1000.0f;
@@ -321,6 +352,9 @@ static void stabilizerTask(void* param)
   // Wait for sensors to be calibrated
   lastWakeTime = xTaskGetTickCount();
   while(!sensorsAreCalibrated()) {
+    bool isArmed = systemIsArmed();
+    bool shouldStop = emergencyStop || !isArmed;
+    logStabilizerStatus("cal", xTaskGetTickCount(), isArmed, shouldStop);
     vTaskDelayUntil(&lastWakeTime, F2T(RATE_MAIN_LOOP));
   }
   // Initialize tick to something else then 0
@@ -371,12 +405,16 @@ static void stabilizerTask(void* param)
 
       checkEmergencyStopTimeout();
 
-      checkStops = systemIsArmed();
-      if (emergencyStop || (systemIsArmed() == false)) {
+      bool isArmed = systemIsArmed();
+      bool shouldStop = emergencyStop || !isArmed;
+      checkStops = isArmed;
+      if (shouldStop) {
         powerStop();
       } else {
         powerDistribution(&control);
       }
+
+      logStabilizerStatus("run", xTaskGetTickCount(), isArmed, shouldStop);
 
       //TODO: Log data to uSD card if configured
       /*if (usddeckLoggingEnabled()

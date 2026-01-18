@@ -61,7 +61,9 @@
   #define PM_SYSTEM_SHUTDOWN_TIMEOUT    M2T(1000 * 60 * SYSTEM_SHUTDOWN_TIMEOUT)
 #endif
 
-#define PM_BAT_DIVIDER                3.0f
+#ifndef PM_BAT_DIVIDER
+#define PM_BAT_DIVIDER                2.0f
+#endif
 #define PM_BAT_ADC_FOR_3_VOLT         (int32_t)(((3.0f / PM_BAT_DIVIDER) / 2.8f) * 4096)
 #define PM_BAT_ADC_FOR_1p2_VOLT       (int32_t)(((1.2f / PM_BAT_DIVIDER) / 2.8f) * 4096)
 

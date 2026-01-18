@@ -238,40 +238,50 @@ void systemTask(void *arg)
   pass &= cfAssertNormalStartTest();
 //  pass &= peerLocalizationTest();
 
-  //Start the firmware
-  if(pass)
-  {
-    selftestPassed = 1;
-    systemStart();
-    DEBUG_PRINTI("systemStart ! selftestPassed = %d", selftestPassed);
-    soundSetEffect(SND_STARTUP);
-    ledseqRun(&seq_alive);
-    ledseqRun(&seq_testPassed);
-  }
-  else
-  {
-    selftestPassed = 0;
-    if (systemTest())
+    //Start the firmware
+    if(pass)
     {
-      while(1)
-      {
-        ledseqRun(&seq_testFailed);
-        vTaskDelay(M2T(2000));
-        // System can be forced to start by setting the param to 1 from the cfclient
-        if (selftestPassed)
-        {
-	        DEBUG_PRINT("Start forced.\n");
-          systemStart();
-          break;
-        }
-      }
+      selftestPassed = 1;
+      systemStart();
+      DEBUG_PRINTI("systemStart ! selftestPassed = %d", selftestPassed);
+      soundSetEffect(SND_STARTUP);
+      ledseqRun(&seq_alive);
+      ledseqRun(&seq_testPassed);
     }
     else
     {
-      ledInit();
-      ledSet(SYS_LED, true);
+#if FORCE_SYSTEM_START
+      selftestPassed = 1;
+      DEBUG_PRINTW("Selftest failed, forcing systemStart.");
+      systemStart();
+      DEBUG_PRINTI("systemStart ! selftestPassed = %d", selftestPassed);
+      soundSetEffect(SND_STARTUP);
+      ledseqRun(&seq_alive);
+      ledseqRun(&seq_testPassed);
+#else
+      selftestPassed = 0;
+      if (systemTest())
+      {
+        while(1)
+        {
+          ledseqRun(&seq_testFailed);
+          vTaskDelay(M2T(2000));
+          // System can be forced to start by setting the param to 1 from the cfclient
+          if (selftestPassed)
+          {
+  	        DEBUG_PRINT("Start forced.\n");
+            systemStart();
+            break;
+          }
+        }
+      }
+      else
+      {
+        ledInit();
+        ledSet(SYS_LED, true);
+      }
+#endif
     }
-  }
   DEBUG_PRINT("Free heap: %"PRIu32" bytes\n", xPortGetFreeHeapSize());
 
   workerLoop();

@@ -32,6 +32,7 @@
 #include "estimator.h"
 #include "crtp.h"
 #include "param.h"
+#include "config.h"
 #include "FreeRTOS.h"
 #include "num.h"
 #include "stm32_legacy.h"
@@ -162,8 +163,11 @@ static void yawModeUpdate(setpoint_t *setpoint)
 void crtpCommanderRpytDecodeSetpoint(setpoint_t *setpoint, CRTPPacket *pk)
 {
   struct CommanderCrtpLegacyValues *values = (struct CommanderCrtpLegacyValues*)pk->data;
+  static TickType_t lastLogTick;
+  int activePriority;
 
-  if (commanderGetActivePriority() == COMMANDER_PRIORITY_DISABLE) {
+  activePriority = commanderGetActivePriority();
+  if (activePriority == COMMANDER_PRIORITY_DISABLE) {
     thrustLocked = true;
   }
   if (values->thrust == 0) {
@@ -178,6 +182,19 @@ void crtpCommanderRpytDecodeSetpoint(setpoint_t *setpoint, CRTPPacket *pk)
   } else {
     setpoint->thrust = fminf(rawThrust, MAX_THRUST);
   }
+
+#if CRTP_SETPOINT_LOG_INTERVAL_MS
+  {
+    TickType_t now = xTaskGetTickCount();
+    if ((CRTP_SETPOINT_LOG_INTERVAL_MS == 0) ||
+        ((now - lastLogTick) >= M2T(CRTP_SETPOINT_LOG_INTERVAL_MS))) {
+      DEBUG_PRINTI("setpoint rx: r=%.2f p=%.2f y=%.2f thr=%u locked=%d pri=%d",
+                   values->roll, values->pitch, values->yaw,
+                   (unsigned)rawThrust, thrustLocked, activePriority);
+      lastLogTick = now;
+    }
+  }
+#endif
 
   if (altHoldMode) {
     setpoint->thrust = 0;
